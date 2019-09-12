@@ -1,0 +1,199 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  GitHubRepositoryOwner:
+    Type: String
+    Description: >
+      Owner of the GitHub Repository containing the CloudFormation template being deployed. Usually
+      your GitHub username
+
+  GitHubRepositoryName:
+    Type: String
+    Default: aws-cloudformation-pipeline-example
+    Description: >
+      Name of the GitHub repository containing the CloudFormation template being deployed. For this
+      example, most likely would be "aws-cloudformation-pipeline-example" but might be different if
+      you changed the name of the forked repository
+
+  GitHubIntegrationBranch:
+    Type: String
+    Default: master
+    Description: >
+      Git branch on which integration occurs. Typical value here would be "master" but might differ
+      for your specific use case
+
+  GitHubPersonalAccessToken:
+    Type: String
+    NoEcho: true
+    Description: >
+      Personal Access Token from GitHub that is used by CodePipeline to clone the source from the
+      repository and configure webhooks. This personal access token requires the "repo" and
+      "admin:repo_hook" scopes in order to function correctly. It is strongly recommended that this
+      value be provided using Secrets Manager. In order to pass value from Secrets Manager, set this
+      parameter value to "{{resolve:secretsmanager:your-secret-id:SecretString}}". More information
+      see: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/dynamic-references.html
+
+  DeploymentStackName:
+    Type: String
+    Description: >
+      Name to give the production stack that is deployed as part of the pipeline
+
+Resources:
+  # S3 Bucket to hold artifacts for the CodePipeline. Only requirement is that the S3 bucket has
+  # versioning enabled. Other settings are following best practices for S3 buckets (encryption,
+  # access logging, blocking public access)
+  PipelineArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: LogDeliveryWrite
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: alias/aws/s3
+      LoggingConfiguration: {}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Type: S3
+        Location: !Sub ${PipelineArtifactsBucket}
+      RoleArn: !Sub ${PipelineRole.Arn}
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              RunOrder: 1
+              InputArtifacts: []
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: "1"
+              Configuration:
+                Owner: !Sub ${GitHubRepositoryOwner}
+                Repo: !Sub ${GitHubRepositoryName}
+                Branch: !Sub ${GitHubIntegrationBranch}
+                OAuthToken: !Sub ${GitHubPersonalAccessToken}
+                PollForSourceChanges: false
+              OutputArtifacts:
+                - Name: SourceArtifact
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              RunOrder: 1
+              RoleArn: !Sub ${PipelineDeployRole.Arn}
+              InputArtifacts:
+                - Name: SourceArtifact
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                RoleArn: !Sub ${CloudFormationStackRole.Arn}
+                StackName: !Sub ${DeploymentStackName}
+                TemplateConfiguration: SourceArtifact::config/production.json
+                TemplatePath: SourceArtifact::templates/workload.template
+
+  # Configures a webhook at GitHub to trigger the CodePipeline whenever a commit is pushed to the
+  # integration branch configured for the stack
+  PipelineWebhook:
+    Type: AWS::CodePipeline::Webhook
+    Properties:
+      Authentication: GITHUB_HMAC
+      AuthenticationConfiguration:
+        SecretToken: !Sub ${GitHubPersonalAccessToken}
+      RegisterWithThirdParty: true
+      Filters:
+        - JsonPath: $.ref
+          MatchEquals: refs/heads/{Branch}
+      TargetPipeline: !Sub ${CodePipeline}
+      TargetAction: Source
+      TargetPipelineVersion: !Sub ${CodePipeline.Version}
+
+  # Role that is passed to CloudFormation in order to deploy the production stack
+  CloudFormationStackRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: cloudformation.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub ${CloudFormationStackPolicy}
+
+  # IAM Policy that determines what permissions CloudFormation has when deploying the production
+  # stack. This policy defines the minimum permissions necessary to carry out deployments.
+  CloudFormationStackPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucket
+            Resource: arn:aws:s3:::*
+
+  # IAM Role assumed by CodePipeline during pipeline executions
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codepipeline.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelineAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${PipelineArtifactsBucket.Arn}/*
+
+  # IAM Role assumed by CodePipeline specifically for the Deploy Stage of the Pipeline
+  PipelineDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            AWS: !Sub ${PipelineRole.Arn}
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelineAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub ${PipelineArtifactsBucket.Arn}/*
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${DeploymentStackName}/*
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub ${CloudFormationStackRole.Arn}
