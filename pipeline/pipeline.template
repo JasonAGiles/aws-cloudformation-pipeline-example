@@ -137,6 +137,7 @@ Resources:
 
   # IAM Policy that determines what permissions CloudFormation has when deploying the production
   # stack. This policy defines the minimum permissions necessary to carry out deployments.
+  # Note: Delete permissions are included here to account for deleting the stack
   CloudFormationStackPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -165,11 +166,14 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Effect: Allow
+              # This statement is required on the pipeline role because the source action has an owner of 'ThirdParty'
+              # and cannot assume a role.
+              - Sid: AllowSourceActionToPutArtifacts
+                Effect: Allow
                 Action: s3:PutObject
                 Resource: !Sub ${PipelineArtifactsBucket.Arn}/*
 
-  # IAM Role assumed by CodePipeline specifically for the Deploy Stage of the Pipeline
+  # IAM Role assumed by CodePipeline specifically for the Deploy Action of the Pipeline
   PipelineDeployRole:
     Type: AWS::IAM::Role
     Properties:
@@ -185,15 +189,18 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Effect: Allow
+              - Sid: RetrieveArtifactsFromBucket
+                Effect: Allow
                 Action: s3:GetObject
                 Resource: !Sub ${PipelineArtifactsBucket.Arn}/*
-              - Effect: Allow
+              - Sid: CreateAndUpdateDeploymentStack
+                Effect: Allow
                 Action:
                   - cloudformation:DescribeStacks
                   - cloudformation:CreateStack
                   - cloudformation:UpdateStack
                 Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${DeploymentStackName}/*
-              - Effect: Allow
+              - Sid: PassStackRoleToCloudFormation
+                Effect: Allow
                 Action: iam:PassRole
                 Resource: !Sub ${CloudFormationStackRole.Arn}
