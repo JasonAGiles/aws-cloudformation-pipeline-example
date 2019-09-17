@@ -116,7 +116,6 @@ Resources:
                 ActionMode: CREATE_UPDATE
                 RoleArn: !Sub ${CloudFormationStackRole.Arn}
                 StackName: !Sub ${DeploymentStackName}
-                TemplateConfiguration: SourceArtifact::config/production.json
                 TemplatePath: SourceArtifact::templates/workload.template
 
   # Configures a webhook at GitHub to trigger the CodePipeline whenever a commit is pushed to the
