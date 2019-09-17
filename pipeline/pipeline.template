@@ -86,6 +86,20 @@ Resources:
                 PollForSourceChanges: false
               OutputArtifacts:
                 - Name: SourceArtifact
+        - Name: Test
+          Actions:
+            - Name: Test
+              RunOrder: 1
+              RoleArn: !Sub ${PipelineTestRole.Arn}
+              InputArtifacts:
+                - Name: SourceArtifact
+              ActionTypeId:
+                Category: Test
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Sub ${CodeBuildIntegrationProject}
         - Name: Deploy
           Actions:
             - Name: Deploy
@@ -120,6 +134,55 @@ Resources:
       TargetPipeline: !Sub ${CodePipeline}
       TargetAction: Source
       TargetPipelineVersion: !Sub ${CodePipeline.Version}
+
+  CodeBuildIntegrationProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:1.0
+        ImagePullCredentialsType: CODEBUILD
+        ComputeType: BUILD_GENERAL1_SMALL
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+      Name: !Sub ${GitHubRepositoryName}-integration
+      ServiceRole: !Sub ${CodeBuildRole.Arn}
+      Source:
+        Type: CODEPIPELINE
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+
+      Policies:
+        - PolicyName: CodeBuildAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub ${PipelineArtifactsBucket.Arn}/*
+              - Effect: Allow
+                Action: cloudformation:ValidateTemplate
+                Resource: "*"
 
   # Role that is passed to CloudFormation in order to deploy the production stack
   CloudFormationStackRole:
@@ -172,6 +235,27 @@ Resources:
                 Effect: Allow
                 Action: s3:PutObject
                 Resource: !Sub ${PipelineArtifactsBucket.Arn}/*
+
+  PipelineTestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            AWS: !Sub ${PipelineRole.Arn}
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelineAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource: !Sub ${CodeBuildIntegrationProject.Arn}
 
   # IAM Role assumed by CodePipeline specifically for the Deploy Action of the Pipeline
   PipelineDeployRole:

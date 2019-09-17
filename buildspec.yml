@@ -1,0 +1,26 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.7
+      ruby: 2.6
+
+    commands:
+      # Install CFN-Lint, YAMLLint
+      - pip3 install cfn-lint yamllint
+
+      # Install cfn-nag
+      - gem install cfn-nag
+
+  build:
+    commands:
+      # Validate Template
+      - aws cloudformation validate-template --template-body file://templates/workload.template
+
+      # Lint Template
+      - yamllint --strict templates/workload.template
+      - cfn-lint --include-checks I --template templates/workload.template
+
+      # Run CFN Nag
+      - cfn_nag --fail-on-warnings --output-format txt templates/workload.template
