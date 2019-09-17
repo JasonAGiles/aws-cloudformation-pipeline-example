@@ -156,6 +156,51 @@ Resources:
       Source:
         Type: CODEPIPELINE
 
+  CodeBuildCredentials:
+    Type: AWS::CodeBuild::SourceCredential
+    Properties:
+      Token: !Sub ${GitHubPersonalAccessToken}
+      ServerType: GITHUB
+      AuthType: PERSONAL_ACCESS_TOKEN
+
+  CodeBuildPRProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Cache:
+        Type: LOCAL
+        Modes:
+          - LOCAL_SOURCE_CACHE
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:1.0
+        ImagePullCredentialsType: CODEBUILD
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: TASKCAT_ROLE_ARN
+            Value: !Sub ${TaskCatRole.Arn}
+            Type: PLAINTEXT
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+      Name: !Sub ${GitHubRepositoryName}-pull-requests
+      ServiceRole: !Sub ${CodeBuildRole.Arn}
+      Source:
+        GitCloneDepth: 1
+        Location: !Sub "https://github.com/${GitHubRepositoryOwner}/${GitHubRepositoryName}.git"
+        ReportBuildStatus: true
+        Type: GITHUB
+      Triggers:
+        Webhook: true
+        FilterGroups:
+          - - Type: EVENT
+              Pattern: PULL_REQUEST_CREATED, PULL_REQUEST_UPDATED, PULL_REQUEST_REOPENED
+              ExcludeMatchedPattern: false
+            - Type: BASE_REF
+              Pattern: !Sub ^refs/heads/${GitHubIntegrationBranch}$
+              ExcludeMatchedPattern: false
+
   CodeBuildRole:
     Type: AWS::IAM::Role
     Properties:
