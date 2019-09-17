@@ -39,28 +39,7 @@ Parameters:
       Name to give the production stack that is deployed as part of the pipeline
 
 Resources:
-  # S3 Bucket to hold artifacts for the CodePipeline. Only requirement is that the S3 bucket has
-  # versioning enabled. Other settings are following best practices for S3 buckets (encryption,
-  # access logging, blocking public access)
-  PipelineArtifactsBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      AccessControl: LogDeliveryWrite
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: aws:kms
-              KMSMasterKeyID: alias/aws/s3
-      LoggingConfiguration: {}
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      VersioningConfiguration:
-        Status: Enabled
-
-  CodePipeline:
+  Pipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
       ArtifactStore:
@@ -90,7 +69,6 @@ Resources:
           Actions:
             - Name: Test
               RunOrder: 1
-              RoleArn: !Sub ${PipelineTestRole.Arn}
               InputArtifacts:
                 - Name: SourceArtifact
               ActionTypeId:
@@ -104,7 +82,6 @@ Resources:
           Actions:
             - Name: Deploy
               RunOrder: 1
-              RoleArn: !Sub ${PipelineDeployRole.Arn}
               InputArtifacts:
                 - Name: SourceArtifact
               ActionTypeId:
@@ -118,6 +95,27 @@ Resources:
                 StackName: !Sub ${DeploymentStackName}
                 TemplatePath: SourceArtifact::templates/workload.template
 
+  # S3 Bucket to hold artifacts for the Pipeline. Only requirement is that the S3 bucket has
+  # versioning enabled. Other settings are following best practices for S3 buckets (encryption,
+  # access logging, blocking public access)
+  PipelineArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: LogDeliveryWrite
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: alias/aws/s3
+      LoggingConfiguration: {}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
   # Configures a webhook at GitHub to trigger the CodePipeline whenever a commit is pushed to the
   # integration branch configured for the stack
   PipelineWebhook:
@@ -130,10 +128,12 @@ Resources:
       Filters:
         - JsonPath: $.ref
           MatchEquals: refs/heads/{Branch}
-      TargetPipeline: !Sub ${CodePipeline}
+      TargetPipeline: !Sub ${Pipeline}
       TargetAction: Source
-      TargetPipelineVersion: !Sub ${CodePipeline.Version}
+      TargetPipelineVersion: !Sub ${Pipeline.Version}
 
+  # CodeBuild project that is run by the Pipeline during the Test Stage. Execution is controlled by
+  # the buildspec.yml file in the root of the repository
   CodeBuildIntegrationProject:
     Type: AWS::CodeBuild::Project
     Properties:
@@ -144,10 +144,6 @@ Resources:
         Image: aws/codebuild/amazonlinux2-x86_64-standard:1.0
         ImagePullCredentialsType: CODEBUILD
         ComputeType: BUILD_GENERAL1_SMALL
-        EnvironmentVariables:
-          - Name: TASKCAT_ROLE_ARN
-            Value: !Sub ${TaskCatRole.Arn}
-            Type: PLAINTEXT
       LogsConfig:
         CloudWatchLogs:
           Status: ENABLED
@@ -156,13 +152,9 @@ Resources:
       Source:
         Type: CODEPIPELINE
 
-  CodeBuildCredentials:
-    Type: AWS::CodeBuild::SourceCredential
-    Properties:
-      Token: !Sub ${GitHubPersonalAccessToken}
-      ServerType: GITHUB
-      AuthType: PERSONAL_ACCESS_TOKEN
-
+  # CodeBuild project that is run any time a PR is created, updated, or reopened for the target
+  # repository. The project will only run if the target branch of the PR is the same as the
+  # integration branch
   CodeBuildPRProject:
     Type: AWS::CodeBuild::Project
     Properties:
@@ -177,10 +169,6 @@ Resources:
         Image: aws/codebuild/amazonlinux2-x86_64-standard:1.0
         ImagePullCredentialsType: CODEBUILD
         ComputeType: BUILD_GENERAL1_SMALL
-        EnvironmentVariables:
-          - Name: TASKCAT_ROLE_ARN
-            Value: !Sub ${TaskCatRole.Arn}
-            Type: PLAINTEXT
       LogsConfig:
         CloudWatchLogs:
           Status: ENABLED
@@ -193,6 +181,8 @@ Resources:
         Type: GITHUB
       Triggers:
         Webhook: true
+        # This Filter group ensures builds only run when a PR is created, updated, or reopened and the
+        # target branch of the PR is the integration branch
         FilterGroups:
           - - Type: EVENT
               Pattern: PULL_REQUEST_CREATED, PULL_REQUEST_UPDATED, PULL_REQUEST_REOPENED
@@ -201,6 +191,21 @@ Resources:
               Pattern: !Sub ^refs/heads/${GitHubIntegrationBranch}$
               ExcludeMatchedPattern: false
 
+  # This grants the CodeBuild service the ability to clone a repository as well as setup a webhook
+  # NOTE: Only one of these tokens can be created per "ServerType" per region. If you plan on setting
+  # up multiple pipelines within the same account and region, you may need to pull this particlar resource
+  # into a different template
+  CodeBuildCredentials:
+    Type: AWS::CodeBuild::SourceCredential
+    Properties:
+      Token: !Sub ${GitHubPersonalAccessToken}
+      ServerType: GITHUB
+      AuthType: PERSONAL_ACCESS_TOKEN
+
+  # Role assumed by CodeBuild projects. Permissions granted allow for logging to CloudWatch, managing artifacts,
+  # validating CloudFormation templates, and the various permissions required to execute taskcat.
+  # Note: The CloudFormation stack policy is also attached to this role, since the same permissions are required to
+  # create/delete the test stacks through taskcat
   CodeBuildRole:
     Type: AWS::IAM::Role
     Properties:
@@ -211,25 +216,60 @@ Resources:
             Principal:
               Service: codebuild.amazonaws.com
             Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub ${CloudFormationStackPolicy}
       Policies:
         - PolicyName: CodeBuildAccess
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Effect: Allow
+              - Sid: LogToCloudWatch
+                Effect: Allow
                 Action:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: "*"
-              - Effect: Allow
+              - Sid: GetAndPutArtifacts
+                Effect: Allow
                 Action:
                   - s3:GetObject
                   - s3:PutObject
                 Resource: !Sub ${PipelineArtifactsBucket.Arn}/*
-              - Effect: Allow
+              - Sid: ValidateCloudFormationTemplate
+                Effect: Allow
                 Action: cloudformation:ValidateTemplate
                 Resource: "*"
+        - PolicyName: TaskCatAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: S3BucketPermissions
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:DeleteBucket
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                  - s3:PutBucketPolicy
+                Resource: arn:aws:s3:::taskcat-*
+              - Sid: S3ObjectPermissions
+                Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: arn:aws:s3:::taskcat-*/*
+              - Sid: CloudFormationPermissions
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:DeleteStack
+                  - cloudformation:ValidateTemplate
+                Resource: !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/tcat-*/*
 
   # Role that is passed to CloudFormation in order to deploy the production stack
   CloudFormationStackRole:
@@ -266,55 +306,9 @@ Resources:
               - s3:PutBucketLogging
             Resource: arn:aws:s3:::*
 
-  TaskCatRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Action: sts:AssumeRole
-            Effect: Allow
-            Principal:
-              AWS: !Sub ${CodeBuildRole.Arn}
-      ManagedPolicyArns:
-        - !Sub ${CloudFormationStackPolicy}
-      Policies:
-        - PolicyName: TaskCatAccess
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: S3BucketPermissions
-                Effect: Allow
-                Action:
-                  - s3:CreateBucket
-                  - s3:DeleteBucket
-                  - s3:GetBucketLocation
-                  - s3:ListBucket
-                  - s3:PutBucketPolicy
-                Resource: arn:aws:s3:::taskcat-*
-              - Sid: S3ObjectPermissions
-                Effect: Allow
-                Action:
-                  - s3:DeleteObject
-                  - s3:GetObject
-                  - s3:PutObject
-                Resource: arn:aws:s3:::taskcat-*/*
-              - Sid: CloudFormationPermissions
-                Effect: Allow
-                Action:
-                  - cloudformation:CreateStack
-                  - cloudformation:DescribeStacks
-                  - cloudformation:DescribeStackEvents
-                  - cloudformation:DescribeStackResources
-                  - cloudformation:DeleteStack
-                  - cloudformation:ValidateTemplate
-                Resource: !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/tcat-*/*
-              - Sid: CloudFormationValidateTemplate
-                Effect: Allow
-                Action: cloudformation:ValidateTemplate
-                Resource: "*"
-
-  # IAM Role assumed by CodePipeline during pipeline executions
+  # IAM Role assumed by CodePipeline during pipeline executions. Gives permission to manage artifacts,
+  # Call CodeBuild project and monitor status, and create and update CloudFormation stacks as part
+  # of the deployment
   PipelineRole:
     Type: AWS::IAM::Role
     Properties:
@@ -330,54 +324,18 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              # This statement is required on the pipeline role because the source action has an owner of 'ThirdParty'
-              # and cannot assume a role.
-              - Sid: AllowSourceActionToPutArtifacts
+              - Sid: GetAndPutArtifacts
                 Effect: Allow
-                Action: s3:PutObject
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
                 Resource: !Sub ${PipelineArtifactsBucket.Arn}/*
-
-  PipelineTestRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          Effect: Allow
-          Principal:
-            AWS: !Sub ${PipelineRole.Arn}
-          Action: sts:AssumeRole
-      Policies:
-        - PolicyName: CodePipelineAccess
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
+              - Sid: ManageCodeBuildJob
+                Effect: Allow
                 Action:
                   - codebuild:BatchGetBuilds
                   - codebuild:StartBuild
                 Resource: !Sub ${CodeBuildIntegrationProject.Arn}
-
-  # IAM Role assumed by CodePipeline specifically for the Deploy Action of the Pipeline
-  PipelineDeployRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          Effect: Allow
-          Principal:
-            AWS: !Sub ${PipelineRole.Arn}
-          Action: sts:AssumeRole
-      Policies:
-        - PolicyName: CodePipelineAccess
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: RetrieveArtifactsFromBucket
-                Effect: Allow
-                Action: s3:GetObject
-                Resource: !Sub ${PipelineArtifactsBucket.Arn}/*
               - Sid: CreateAndUpdateDeploymentStack
                 Effect: Allow
                 Action:
