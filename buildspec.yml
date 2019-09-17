@@ -7,11 +7,16 @@ phases:
       ruby: 2.6
 
     commands:
-      # Install CFN-Lint, YAMLLint
-      - pip3 install cfn-lint yamllint
+      # Install CFN-Lint, taskcat, YAMLLint
+      - pip3 install cfn-lint taskcat yamllint
 
       # Install cfn-nag
       - gem install cfn-nag
+
+  pre_build:
+    commands:
+      - aws configure --profile taskcat set role_arn ${TASKCAT_ROLE_ARN}
+      - aws configure --profile taskcat set credential_source EcsContainer
 
   build:
     commands:
@@ -24,3 +29,17 @@ phases:
 
       # Run CFN Nag
       - cfn_nag --fail-on-warnings --output-format txt templates/workload.template
+
+      # Run taskcat
+      - |
+        AWS_PROFILE=taskcat taskcat -c ci/taskcat.yml | sed "s,\x1B\[[0-9;]*[a-zA-Z],,g"
+        TASKCAT_RESULT=${PIPESTATUS[0]}
+
+        ls -1 taskcat_outputs/*.txt | while read LOG
+        do
+          echo
+          echo "> $LOG"
+          cat ${LOG}
+        done
+
+        exit $TASKCAT_RESULT
