@@ -38,6 +38,21 @@ Parameters:
     Description: >
       Name to give the production stack that is deployed as part of the pipeline
 
+  PassGitHubPersonalAccessTokenToCodeBuild:
+    Type: String
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "true"
+    Description: >
+      Determines whether or not your personal access token is passed to CodeBuild. Set this value to
+      "true" if this is the first time using CodeBuild with GitHub, as CodeBuild only supports one
+      personal access token per account, per region. If you have already configured other CodeBuild
+      projects to integrate with GitHub previously, set this value to "false".
+
+Conditions:
+  CreateCodeBuildCredentials: !Equals [ !Sub "${PassGitHubPersonalAccessTokenToCodeBuild}", "true" ]
+
 Resources:
   Pipeline:
     Type: AWS::CodePipeline::Pipeline
@@ -62,7 +77,7 @@ Resources:
                 Repo: !Sub ${GitHubRepositoryName}
                 Branch: !Sub ${GitHubIntegrationBranch}
                 OAuthToken: !Sub ${GitHubPersonalAccessToken}
-                PollForSourceChanges: false
+                PollForSourceChanges: false # Must be set to false when using webhooks
               OutputArtifacts:
                 - Name: SourceArtifact
         - Name: Test
@@ -196,6 +211,7 @@ Resources:
   # up multiple pipelines within the same account and region, you may need to pull this particlar resource
   # into a different template
   CodeBuildCredentials:
+    Condition: CreateCodeBuildCredentials
     Type: AWS::CodeBuild::SourceCredential
     Properties:
       Token: !Sub ${GitHubPersonalAccessToken}
@@ -268,8 +284,11 @@ Resources:
                   - cloudformation:DescribeStackEvents
                   - cloudformation:DescribeStackResources
                   - cloudformation:DeleteStack
-                  - cloudformation:ValidateTemplate
                 Resource: !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/tcat-*/*
+              - Sid: ValidateCloudFormationTemplate
+                Effect: Allow
+                Action: cloudformation:ValidateTemplate
+                Resource: "*"
 
   # Role that is passed to CloudFormation in order to deploy the production stack
   CloudFormationStackRole:
